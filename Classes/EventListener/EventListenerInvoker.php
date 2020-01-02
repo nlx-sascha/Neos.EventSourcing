@@ -69,21 +69,31 @@ final class EventListenerInvoker
             $appliedEventsStorage = new DoctrineAppliedEventsStorage($this->entityManager->getConnection(), \get_class($listener));
         }
         $highestAppliedSequenceNumber = $appliedEventsStorage->reserveHighestAppliedEventSequenceNumber();
+        $isFullReplay = $highestAppliedSequenceNumber === -1;
+        $eventsCount = 0;
         $streamName = $listener instanceof StreamAwareEventListenerInterface ? $listener::listensToStream() : StreamName::all();
         $eventStore = $this->getEventStoreForEventListener($listener);
         $eventStream = $eventStore->load($streamName, $highestAppliedSequenceNumber + 1);
         foreach ($eventStream as $eventEnvelope) {
+            $eventsCount++;
             try {
                 $this->applyEvent($listener, $eventEnvelope);
+                $highestAppliedSequenceNumber = $eventEnvelope->getRawEvent()->getSequenceNumber();
             } catch (EventCouldNotBeAppliedException $exception) {
                 $appliedEventsStorage->releaseHighestAppliedSequenceNumber();
                 throw $exception;
             }
-            $appliedEventsStorage->saveHighestAppliedSequenceNumber($eventEnvelope->getRawEvent()->getSequenceNumber());
+
+            if (!$isFullReplay || $eventsCount > 100) {
+                $eventsCount = 0;
+                $appliedEventsStorage->saveHighestAppliedSequenceNumber($highestAppliedSequenceNumber);
+            }
+
             if ($progressCallback !== null) {
                 $progressCallback($eventEnvelope);
             }
         }
+        $appliedEventsStorage->saveHighestAppliedSequenceNumber($highestAppliedSequenceNumber);
         $appliedEventsStorage->releaseHighestAppliedSequenceNumber();
     }
 
